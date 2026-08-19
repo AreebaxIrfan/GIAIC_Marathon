@@ -328,5 +328,413 @@ Then delete the throwaway repo or keep it as a reference for Day 03+.
 
 ---
 
-*GIAIC Marathon · Day 02 — the loop runs, the tutor writes, the checker guards,
-the SoR remembers. Day 03 makes it visible.*
+---
+
+## 11. Deep Dive: MCP (Model Context Protocol) in This Scenario
+
+### 11.1 What MCP Actually Is Here
+
+MCP is the **standardized wire** that lets the Maker agent call the Zia tutor
+as a tool — no HTTP API design, no custom SDK, no parsing. The contract is:
+
+```
+Maker (Claude Code)  ──stdio──▶  zia-tutor MCP Server  ──returns──▶  Draft JSON
+```
+
+| Layer | This Repo | Purpose |
+|---|---|---|
+| **Transport** | stdio (local) | Zero config, works in any CLI session |
+| **Protocol** | JSON-RPC 2.0 | Standard, language-agnostic |
+| **Discovery** | `tools/list` | Maker asks "what can you do?" at startup |
+| **Invocation** | `tools/call` | Maker sends `{tier, context}` → gets `{subject, body, tone_notes}` |
+
+### 11.2 The MCP Server (`mcp-servers/zia-tutor/index.js`)
+
+```javascript
+// Exposes ONE tool: draft_proposal
+{
+  name: "draft_proposal",
+  description: "Draft a respectful marriage proposal email for the specified tier",
+  inputSchema: {
+    tier: { enum: [1,2,3,4,5,"father"] },
+    context: { target_name, sender_name, shared_memories, ... }
+  }
+}
+```
+
+**Why MCP beats a direct function call:**
+- **Replaceable** — swap Zia for another tutor without touching Maker
+- **Language-agnostic** — server in Node, Python, Go; client in any language
+- **Secure by default** — stdio sandbox, no network exposure
+- **Discoverable** — new tools auto-appear in `tools/list`
+- **Composable** — chain multiple MCP servers (Zia + SMTP + Calendar + …)
+
+### 11.3 Registering the Server (`.claude.json`)
+
+```json
+{
+  "mcpServers": {
+    "zia-tutor": {
+      "command": "node",
+      "args": ["index.js"],
+      "cwd": "${workspaceFolder}/mcp-servers/zia-tutor"
+    }
+  }
+}
+```
+
+Claude Code reads this at startup → spawns the server → exposes `draft_proposal`
+to every agent in the session. The Maker doesn't know or care *how* Zia works.
+
+### 11.4 The Call Flow (Maker → Zia)
+
+```javascript
+// Inside maker.js — simplified
+const draft = await callMCP(tier, context);
+// callMCP does:
+// 1. Spawns zia-tutor via stdio
+// 2. Sends JSON-RPC: tools/call {name: "draft_proposal", arguments: {tier, context}}
+// 3. Parses response → {subject, body, tone_notes}
+// 4. Returns to Maker logic
+```
+
+**Error handling:** If MCP fails (timeout, crash, schema error), Maker falls back
+to a basic template and marks `tone_notes: "Fallback template (MCP unavailable)"`
+so the Checker can flag it.
+
+---
+
+## 12. Deep Dive: Loops — The Three Routines
+
+This scenario uses **three distinct loop types** running concurrently:
+
+| Loop | Concept | Schedule | Role |
+|---|---|---|---|
+| **Maker** | 6 (Unattended Schedule) | Daily 08:00 | Drives the proposal forward |
+| **Checker** | 11 (Maker-Checker) | Daily 08:15 | Verifies Maker's work |
+| **Watcher** | 7 (Event-Driven) | Every 30 min | Detects replies (yes/no) |
+
+### 12.1 Maker — The "Doer" (Concept 6 + Goal)
+
+```text
+/goal "Read SoR. If yes → cancel. If no & tier<5 → tier++.
+       If no & tier=5 → escalate to father.
+       Call zia-tutor.draft_proposal(tier, context).
+       Send email. Append to SoR history. Commit."
+```
+
+**Key behaviors:**
+- **Idempotent** — reads SoR every run; safe to re-run
+- **Self-cancelling** — on `status: "yes"`, tells Claude to cancel its own routine
+- **State-driven** — never trusts memory; SoR is the only truth
+
+### 12.2 Checker — The "Guard" (Concept 11)
+
+```text
+/goal "Read SoR. Verify: (a) email logged in last 30min,
+       (b) tier matches current_tier, (c) Zia was called (tone_notes present),
+       (d) recipient correct. Write checker_ok: true/false + reason. Commit."
+```
+
+**Why separate agent?** Same prompt, same model, but **different role** =
+different failure modes caught. Maker optimizes for "get it sent"; Checker
+optimizes for "prove it was sent correctly."
+
+### 12.3 Watcher — The "Listener" (Concept 7)
+
+```text
+/goal "Poll IMAP for replies from target/father.
+       Classify: yes / no / neutral.
+       Update SoR: status='yes' → cancel routines; status='no' → Maker increments."
+```
+
+**Event-driven vs scheduled:** Watcher runs frequently (30 min) because
+replies are *external events* — we don't control when they arrive. This is
+Concept 7: the loop wakes on *external signal*, not just timer.
+
+### 12.4 Loop Lifecycle Diagram
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   CRON      │     │   CRON      │     │  CRON/POLL  │
+│  08:00      │     │  08:15      │     │  */30       │
+│  (Maker)    │     │  (Checker)  │     │  (Watcher)  │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       ▼                   ▼                   ▼
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ READ SoR    │     │ READ SoR    │     │ READ SoR    │
+│ CALL Zia    │     │ CHECK:      │     │ POLL IMAP   │
+│ SEND email  │     │  email?     │     │ CLASSIFY    │
+│ WRITE SoR   │     │  tier?      │     │ WRITE SoR   │
+│ COMMIT      │     │  Zia?       │     │ (status)    │
+└──────┬──────┘     │  recipient? │     └──────┬──────┘
+       │            │  no drift?  │            │
+       │            │ WRITE checker_ok  │       │
+       │            └──────┬──────┘            │
+       │                   │                   │
+       └───────────────────┼───────────────────┘
+                           ▼
+                  ┌─────────────────┐
+                  │  SoR (Git)      │
+                  │  proposal.json  │
+                  │  + git history  │
+                  └─────────────────┘
+```
+
+---
+
+## 13. Deep Dive: Claude Code as the Loop Runtime
+
+### 13.1 What "Claude Code" Provides Here
+
+| Capability | Used In This Scenario |
+|---|---|
+| **`/loop` → Routines** | Schedules Maker/Checker/Watcher as persistent cron jobs |
+| **`/goal`** | Declarative intent for each routine (what, not how) |
+| **MCP Client** | Auto-spawns `zia-tutor`, handles JSON-RPC, exposes tools |
+| **Git Integration** | `git add/commit` in agents = audit trail for free |
+| **Tool Permissions** | Trusted folder = loops run without prompting |
+| **Session Persistence** | Routines survive terminal close (Concept 6) |
+
+### 13.2 The Agent Model (Not "One Big Prompt")
+
+Each routine is a **separate agent invocation** with its own context:
+
+```
+Routine "proposal-maker" (daily 08:00)
+  ├─ Fresh context
+  ├─ Reads SoR (proposal.json)
+  ├─ Calls zia-tutor (MCP)
+  ├─ Sends email
+  ├─ Writes SoR + commits
+  └─ Exits
+
+Routine "proposal-checker" (daily 08:15)
+  ├─ Fresh context
+  ├─ Reads SoR
+  ├─ Runs 5 verification checks
+  ├─ Writes checker_ok
+  └─ Exits
+```
+
+**Why this matters:** No context pollution. Maker's reasoning doesn't leak into
+Checker. Each run is stateless except the SoR — exactly like a proper
+microservice.
+
+### 13.3 Permissions Model (Trust Once, Run Forever)
+
+```bash
+# First run only:
+claude
+# "Do you trust this folder?" → YES
+```
+
+After that, the routines have the permissions they need (file read/write, git,
+spawn MCP server, network for SMTP). No more prompts — the loops truly run
+unattended.
+
+---
+
+## 14. Deep Dive: Skills — The Proposal Writer Contract
+
+### 14.1 What a Skill Is Here
+
+A **skill** is a *contract document* that defines:
+- What the tool does (interface)
+- How it should behave (guardrails, tone, culture)
+- What the caller expects (schema, examples)
+
+It lives in `.claude/skills/proposal-writer.md` and is **human-readable but
+machine-actionable** — the MCP server implements it; the Maker calls it.
+
+### 14.2 The Skill Structure
+
+```markdown
+# proposal-writer skill
+
+## Tool: draft_proposal(tier, context)
+
+## Tier Definitions (1-5 + father)
+- Tier 1: Formal introduction, no pressure
+- Tier 2: Personal connection, shared memory
+- Tier 3: Vulnerability, honesty
+- Tier 4: Direct, unambiguous ask
+- Tier 5: Final, closure, well-wishes
+- Father: Permission to speak, not to decide
+
+## Cultural Guardrails
+- Never persist after clear "no" past Tier 5
+- Always include autonomy statement
+- Use proper honorifics from context.cultural_notes
+- Father escalation = permission to speak ONLY
+
+## Return Schema
+{ subject, body, tone_notes }
+```
+
+### 14.3 Why Skills > Prompts
+
+| Prompt in Maker | Skill File |
+|---|---|
+| Duplicated in every routine | **Single source of truth** |
+| Hard to version | **Git-tracked, reviewable** |
+| Implicit behavior | **Explicit contract** |
+| Maker-coupled | **MCP-server-agnostic** (any server can implement) |
+
+The skill is the **API specification**. The MCP server is the **implementation**.
+The Maker is the **consumer**. Three separate concerns.
+
+---
+
+## 15. Deep Dive: Agents — The Three Personalities
+
+Each routine runs as a distinct **agent persona** with a focused prompt:
+
+### 15.1 Maker Agent — "The Persistent Suitor"
+
+**Prompt essence:** *"You are writing a respectful proposal sequence. Read the
+SoR to know where you are. Call Zia for wording. Send. Record. Stop when she
+says yes."*
+
+**Traits:**
+- Goal-oriented (declarative `/goal`)
+- Optimistic but bounded (max 5 tiers + father)
+- Delegates phrasing to Zia (separation of concerns)
+- Commits every action (auditability)
+
+### 15.2 Checker Agent — "The Skeptical Auditor"
+
+**Prompt essence:** *"You are verifying the Maker's work. Assume it might have
+failed silently. Check everything. Report pass/fail with evidence."*
+
+**Traits:**
+- Adversarial mindset (assume failure)
+- Checks *orthogonal* things (email log ≠ SoR ≠ MCP log)
+- Binary output: `checker_ok: true` or `false + reason`
+- No "fixing" — only *flagging*
+
+### 15.3 Watcher Agent — "The Patient Listener"
+
+**Prompt essence:** *"You are watching for replies. Classify honestly. Update
+the SoR so the other agents react correctly. No opinion — just classification."*
+
+**Traits:**
+- Event-driven (Concept 7)
+- Neutral classifier (yes/no/neutral)
+- Updates SoR → triggers Maker/Checker behavior change
+- High frequency (30 min) because external timing is unknown
+
+### 15.4 Agent Separation = System Reliability
+
+```
+Maker FAILS to send email
+    │
+    ▼
+Checker CATCHES it (email log empty)
+    │
+    ▼
+SoR: checker_ok=false, checker_reason="No email in log"
+    │
+    ▼
+Human alerted / next Maker run sees failure
+```
+
+If Maker and Checker were the same agent, the failure would be rationalized
+away. **Separate agents = separate failure modes caught.**
+
+---
+
+## 16. Putting It All Together: The Data Flow
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                        DAILY 08:00 — MAKER RUNS                            │
+├────────────────────────────────────────────────────────────────────────────┤
+│  1. READ SoR (proposal.json)                                               │
+│     current_tier=1, status=awaiting_reply, history=[]                      │
+│                                                                            │
+│  2. BUILD CONTEXT for Zia                                                  │
+│     { target_name:"Ayesha", sender_name:"Ahmed",                           │
+│       shared_memories:["GIAIC","Quranic Arabic"], ... }                    │
+│                                                                            │
+│  3. CALL MCP: zia-tutor.draft_proposal(tier=1, context)                    │
+│     ◄── returns {subject, body, tone_notes:"Formal, courteous..."}         │
+│                                                                            │
+│  4. SEND EMAIL (simulated → email_log.jsonl)                               │
+│                                                                            │
+│  5. WRITE SoR: append history{tier:1, sent_at, recipient, ...},            │
+│     status=awaiting_reply, last_checked=now                                │
+│                                                                            │
+│  6. GIT COMMIT: "chore(sor): Tier 1 proposal sent"                        │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                       DAILY 08:15 — CHECKER RUNS                           │
+├────────────────────────────────────────────────────────────────────────────┤
+│  1. READ SoR (same file)                                                   │
+│                                                                            │
+│  2. RUN 5 CHECKS:                                                          │
+│     ✅ Email in log within 30min of sent_at                                │
+│     ✅ History tier (1) == SoR current_tier (1)                            │
+│     ✅ tone_notes present (not "Fallback") → Zia was called                │
+│     ✅ Recipient == ayesha@example.com (target, not father)                │
+│     ✅ Status == awaiting_reply                                            │
+│                                                                            │
+│  3. WRITE SoR: checker_ok=true, checker_reason="All checks passed"         │
+│                                                                            │
+│  4. GIT COMMIT: "chore(sor): checker verification — pass"                 │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                    EVERY 30 MIN — WATCHER RUNS                             │
+├────────────────────────────────────────────────────────────────────────────┤
+│  1. READ SoR (status=awaiting_reply)                                       │
+│                                                                            │
+│  2. POLL reply_log.jsonl (simulated IMAP)                                  │
+│     Found: "Thank you... I need time" from ayesha@example.com              │
+│                                                                            │
+│  3. CLASSIFY: "neutral" (no yes/no keywords)                               │
+│                                                                            │
+│  4. WRITE SoR: history[0].reply = "...", status unchanged                  │
+│                                                                            │
+│  5. GIT COMMIT: "chore(sor): watcher — neutral reply recorded"            │
+└────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+            NEXT DAY 08:00                    LATER: "yes" REPLY
+            Maker sees status=                Watcher classifies "yes"
+            awaiting_reply →                  SoR: status=yes
+            sends Tier 2                      Maker next run: cancels
+```
+
+---
+
+## 17. Running the Full Cycle Locally
+
+```bash
+# 1. Install MCP server deps
+npm run install:all
+
+# 2. Run one full cycle (Maker → Checker → Watcher)
+npm run test:loop
+
+# 3. Inspect the SoR after
+cat loops/proposal-loop/proposal.json | jq
+
+# 4. Run again → Maker increments to Tier 2
+npm run test:loop
+
+# 5. After 3 runs, reply_log has "no" → Maker escalates to father
+# 6. Add a "yes" reply to reply_log.jsonl → Watcher sets status=yes
+# 7. Next Maker run → self-cancels (goal met)
+```
+
+---
+
+*GIAIC Marathon · Day 02 — MCP wires the tutor, Loops drive the rhythm, Claude
+hosts the agents, Skills define the contract, Agents play their roles. The SoR
+remembers it all.*
