@@ -1,0 +1,25 @@
+{
+  "proposal": {
+    "target": "ayesha@example.com",
+    "target_name": "Ayesha",
+    "father": "father@example.com",
+    "father_name": "Khan",
+    "sender_name": "Ahmed",
+    "sender_father_name": "Hassan",
+    "sender_family_background": "a respected family from Lahore",
+    "current_tier": 1,
+    "max_tiers": 5,
+    "status": "awaiting_reply",
+    "shared_memories": [
+      "studied together at GIAIC",
+      "both love Quranic Arabic",
+      "volunteered at the same Ramadan iftar drive"
+    ],
+    "cultural_notes": "South Asian Muslim family; use respectful honorifics; involve family appropriately",
+    "contact_info": "Phone: +92-XXX-XXXXXXX | Email: ahmed@example.com",
+    "history": [],
+    "last_checked": null,
+    "checker_ok": null,
+    "checker_reason": null
+  }
+}

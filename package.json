@@ -1,0 +1,21 @@
+{
+  "name": "giaic-marathon",
+  "version": "1.0.0",
+  "description": "GIAIC Marathon — Loop Engineering track: Day 01 (Concepts) → Day 02 (Five-Tier Proposal Loop with MCP/Zia)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:loop": "node loops/proposal-loop/run-loop.js",
+    "mcp:zia": "node mcp-servers/zia-tutor/index.js",
+    "install:all": "cd mcp-servers/zia-tutor && npm install"
+  },
+  "keywords": [
+    "loop-engineering",
+    "claude-code",
+    "mcp",
+    "automation",
+    "giaic"
+  ],
+  "author": "Areeba Irfan",
+  "license": "MIT"
+}

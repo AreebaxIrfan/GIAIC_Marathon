@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "zia-tutor": {
+      "command": "node",
+      "args": ["index.js"],
+      "cwd": "${workspaceFolder}/mcp-servers/zia-tutor"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+name: Commit Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install commitlint
+        run: npm install -D @commitlint/cli @commitlint/config-conventional
+
+      - name: Validate commit messages
+        run: |
+          # Get the range of commits to check
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, check commits in the PR
+            git fetch origin ${{ github.base_ref }}
+            npx commitlint --from=origin/${{ github.base_ref }} --to=HEAD --verbose
+          else
+            # For push to main, check the last commit
+            npx commitlint --from=HEAD~1 --to=HEAD --verbose
+          fi

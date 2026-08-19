@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+mcp-servers/*/node_modules/
+
+# Environment & secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Logs
+*.log
+email_log.jsonl
+reply_log.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
+System Volume Information/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary
+*.tmp
+*.temp
+.tmp/
+
+# Claude
+.claude/settings.local.json
